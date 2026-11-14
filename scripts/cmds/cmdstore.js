@@ -137,17 +137,19 @@ function alignColumns(rows) {
 		const at = row.indexOf("\t");
 
 		return at === -1
-			? [row, null]
-			: [row.slice(0, at), row.slice(at + 1)];
+			? [row, ""]
+			: [row.slice(0, at).trim(), row.slice(at + 1).trim()];
 	});
 
-	const width = Math.max(0, ...parts.map(([left]) => left.length)) + 1;
+	const maxLabelLen = Math.max(0, ...parts.map(([left]) => left.length));
 
-	return parts.map(([left, right]) =>
-		right === null
-			? left
-			: `${left} :${" ".repeat(Math.max(1, width - left.length))}{right}`
-	);
+	return parts.map(([left, right]) => {
+		if (!right) return left;
+
+		const paddedLabel = left.padEnd(maxLabelLen, " ");
+
+		return `${paddedLabel} : ${right}`;
+	});
 }
 
 function formatStamp(value) {
@@ -206,12 +208,12 @@ function commandCard(item, index) {
 
 	return card(
 		`${rank} · ${truncate(item.name, 30)}`,
-		[
-			`ID       : #${item.id}`,
-			`Author   : ${truncate(item.author || "Unknown", 24)}`,
-			`Version  : v${item.latestVersion || "Unknown"}`,
-			`Category : ${truncate(item.category || "Uncategorized", 20)}`
-		]
+		alignColumns([
+			`ID\t#${item.id}`,
+			`Author\t${truncate(item.author || "Unknown", 24)}`,
+			`Version\tv${item.latestVersion || "Unknown"}`,
+			`Category\t${truncate(item.category || "Uncategorized", 20)}`
+		])
 	);
 }
 
@@ -546,7 +548,7 @@ function existingFileFor(name, aliases) {
 
 const LANGS = {
 	en: {
-		title: "ＣＯＭＭＡＮＤ ＳＴＯＲＥ",
+		title: "ＣＯＭＭＡＮＤ 𝗦𝗧𝗢𝗥𝗘",
 
 		usageFind: "{pn} <name> [page] - Search commands",
 		usageAuthor: "{pn} -a <author> [page] - Commands by author",
@@ -1207,7 +1209,11 @@ async function installCommand(ctx, id, override) {
 
 async function handleReply(ctx) {
 	const { event, Reply } = ctx;
-	if (String(event.senderID || event.userID) !== String(Reply?.author)) return;
+
+	if (String(event.senderID || event.userID) !== String(Reply?.author)) {
+		return;
+	}
+
 	const { args } = ctx;
 	const L = langOf(ctx.getLang);
 	const data = Reply?.data || {};
