@@ -16,415 +16,101 @@ const CONFIG = {
 	autoPublish: process.env.GOATSTORE_AUTO_PUBLISH !== "false"
 };
 
-let axios;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const pad = (n) => String(n).padStart(2, "0");
+const log = (m) => console.log(`[commandstore] ${m}`);
+const auth = (key) => (key ? { Authorization: `Bearer ${key}` } : {});
+const trunc = (v, max) => {
+	const t = String(v ?? "").replace(/\s+/g, " ").trim();
+	return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+};
 
-try {
-	axios = require("axios");
-} catch {
-	axios = null;
-}
-
-const isAxios = Boolean(axios);
-
-function request(options, body) {
-	if (isAxios) {
-		return axios({
-			method: options.method,
-			url: options.url,
-			headers: options.headers,
-			data: body,
-			timeout: CONFIG.timeoutMs,
-			maxRedirects: 3,
-			validateStatus: () => true
-		});
-	}
-
-	return httpRequest(options.url, options, body, 0);
-}
-
-function httpRequest(rawUrl, options, body, redirects) {
-	return new Promise((resolve, reject) => {
-		const url = new URL(rawUrl);
-		const transport = url.protocol === "http:" ? require("http") : require("https");
-
-		const req = transport.request(
-			{
-				method: options.method,
-				hostname: url.hostname,
-				port: url.port || (url.protocol === "http:" ? 80 : 443),
-				path: `${url.pathname}${url.search}`,
-				headers: options.headers
-			},
-			(res) => {
-				if (
-					res.statusCode >= 300 &&
-					res.statusCode < 400 &&
-					res.headers.location &&
-					redirects < 3
-				) {
-					res.resume();
-
-					resolve(
-						httpRequest(
-							new URL(res.headers.location, url).toString(),
-							options,
-							body,
-							redirects + 1
-						)
-					);
-
-					return;
-				}
-
-				let data = "";
-
-				res.setEncoding("utf8");
-
-				res.on("data", (chunk) => {
-					data += chunk;
-				});
-
-				res.on("end", () => {
-					resolve({
-						status: res.statusCode,
-						data,
-						headers: res.headers
-					});
-				});
-			}
-		);
-
-		req.on("error", reject);
-
-		req.setTimeout(CONFIG.timeoutMs, () => {
-			req.destroy(new Error("request timed out"));
-		});
-
-		if (body) req.write(body);
-
-		req.end();
-	});
-}
-
-function parseBody(response) {
-	const data = response.data;
-
-	if (data && typeof data === "object") return data;
-
-	try {
-		return JSON.parse(data);
-	} catch {
-		return {};
-	}
-}
-
-function sleep(ms) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function truncate(value, max) {
-	const text = String(value === null || value === undefined ? "" : value)
-		.replace(/\s+/g, " ")
-		.trim();
-
-	if (text.length <= max) return text;
-
-	return `${text.slice(0, max - 1)}…`;
-}
-
-function alignColumns(rows) {
-	const parts = rows.map((row) => {
-		const at = row.indexOf("\t");
-
-		return at === -1
-			? [row, ""]
-			: [row.slice(0, at).trim(), row.slice(at + 1).trim()];
-	});
-
-	const maxLabelLen = Math.max(0, ...parts.map(([left]) => left.length));
-
-	return parts.map(([left, right]) => {
-		if (!right) return left;
-
-		const paddedLabel = left.padEnd(maxLabelLen, " ");
-
-		return `${paddedLabel} : ${right}`;
-	});
-}
-
-function formatStamp(value) {
-	if (!value) return "";
-
-	const date = new Date(value);
-
-	if (Number.isNaN(date.getTime())) return String(value);
-
-	const pad = (n) => String(n).padStart(2, "0");
-
-	return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
-}
-
-function boldText(value) {
-	const chars = {
-		A: "𝗔", B: "𝗕", C: "𝗖", D: "𝗗", E: "𝗘",
-		F: "𝗙", G: "𝗚", H: "𝗛", I: "𝗜", J: "𝗝",
-		K: "𝗞", L: "𝗟", M: "𝗠", N: "𝗡", O: "𝗢",
-		P: "𝗣", Q: "𝗤", R: "𝗥", S: "𝗦", T: "𝗧",
-		U: "𝗨", V: "𝗩", W: "𝗪", X: "𝗫", Y: "𝗬",
-		Z: "𝗭",
-		0: "𝟬", 1: "𝟭", 2: "𝟮", 3: "𝟯", 4: "𝟰",
-		5: "𝟱", 6: "𝟲", 7: "𝟳", 8: "𝟴", 9: "𝟵"
-	};
-
-	return String(value)
-		.toUpperCase()
-		.split("")
-		.map((char) => chars[char] || char)
-		.join("");
-}
-
-function formatHeading(title) {
-	return `[ ${boldText(title)} ]`;
+function bold(text) {
+	return [...String(text).toUpperCase()].map((c) => {
+		if (c >= "A" && c <= "Z") return String.fromCodePoint(0x1d5d4 + c.charCodeAt(0) - 65);
+		if (c >= "0" && c <= "9") return String.fromCodePoint(0x1d7ec + c.charCodeAt(0) - 48);
+		return c;
+	}).join("");
 }
 
 function card(title, body = [], footer) {
-	const lines = [`┌─ ${formatHeading(title)}`];
-
-	for (const line of body) {
-		lines.push(line ? `│ ${line}` : "│");
-	}
-
-	if (footer) {
-		lines.push(`└─ ${footer}`);
-	} else {
-		lines.push("└────────────────⭔");
-	}
-
-	return lines.join("\n");
+	const end = footer ? `└─ ${footer}` : "└────────────────⭔";
+	return [`┌─ [ ${bold(title)} ]`, ...body.map((l) => (l ? `│ ${l}` : "│")), end].join("\n");
 }
 
-function commandCard(item, index) {
-	const rank = String(index + 1).padStart(2, "0");
+const notice = (title, msg) => card(title, [msg]);
 
-	return card(
-		`${rank} · ${truncate(item.name, 30)}`,
-		alignColumns([
-			`ID\t#${item.id}`,
-			`Author\t${truncate(item.author || "Unknown", 24)}`,
-			`Version\tv${item.latestVersion || "Unknown"}`,
-			`Category\t${truncate(item.category || "Uncategorized", 20)}`
-		])
-	);
+function kv(rows) {
+	const w = Math.max(...rows.map(([k]) => k.length));
+	return rows.map(([k, v]) => `${k.padEnd(w)} : ${v}`);
 }
 
-function notice(title, message, footer) {
-	return card(title, [String(message)], footer);
+function stamp(v) {
+	if (!v) return "";
+	const d = new Date(v);
+	if (Number.isNaN(d.getTime())) return String(v);
+	return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
-function parseConfig(source) {
-	const readString = (key) => {
-		const re = new RegExp(`${key}\\s*:\\s*(['"\`])((?:(?!\\1).)*)\\1`, "s");
-		const m = source.match(re);
+async function http(url, opts = {}) {
+	const res = await fetch(url, { ...opts, redirect: "follow", signal: AbortSignal.timeout(CONFIG.timeoutMs) });
+	const text = await res.text();
+	let data = {};
+	try { data = JSON.parse(text); } catch {}
+	return { ok: res.ok, status: res.status, data, text };
+}
 
-		return m ? m[2] : undefined;
-	};
-
-	const readNumber = (key) => {
-		const m = source.match(new RegExp(`${key}\\s*:\\s*(-?\\d+)`));
-
-		return m ? Number(m[1]) : undefined;
-	};
-
-	const aliases = [];
-	const aliasMatch = source.match(/aliases\s*:\s*\[([^\]]*)\]/s);
-
-	if (aliasMatch) {
-		for (const m of aliasMatch[1].matchAll(/['"`]([^'"`]+)['"`]/g)) {
-			aliases.push(m[1]);
-		}
+async function storeGet(endpoint, query = {}) {
+	const url = new URL(CONFIG.storeApi + endpoint);
+	for (const [k, v] of Object.entries(query)) {
+		if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
 	}
-
-	return {
-		name: readString("name"),
-		author: readString("author") || "unknown",
-		version: readString("version") || "1.0.0",
-		category: readString("category") || "uncategorized",
-		aliases,
-		role: readNumber("role"),
-		countDown: readNumber("countDown")
-	};
+	const res = await http(url, { headers: { Accept: "application/json", ...auth(CONFIG.storeKey) } });
+	if (!res.ok) throw new Error(res.data?.error?.message || `store responded ${res.status}`);
+	return res.data;
 }
 
 function detectRepo() {
-	if (process.env.GOATSTORE_REPO) {
-		return process.env.GOATSTORE_REPO;
-	}
-
+	if (process.env.GOATSTORE_REPO) return process.env.GOATSTORE_REPO;
 	try {
-		const gitConfig = fs.readFileSync(
-			path.join(process.cwd(), ".git", "config"),
-			"utf8"
-		);
-
-		const m = gitConfig.match(/url\s*=\s*(.+)/);
-
-		if (m) {
-			const url = m[1].trim();
-			const ssh = url.match(/git@[^:]+:([^/]+\/[^/]+?)(?:\.git)?$/);
-
-			if (ssh) return ssh[1];
-
-			const https = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
-
-			if (https) return https[1];
-		}
-	} catch {
-	}
-
-	try {
-		const pkg = JSON.parse(
-			fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")
-		);
-
-		const repository =
-			typeof pkg.repository === "string"
-				? pkg.repository
-				: pkg.repository?.url;
-
-		if (repository) {
-			const m = repository.match(/([^/]+\/[^/]+?)(?:\.git)?$/);
-
-			if (m) return m[1];
-		}
-	} catch {
-	}
-
+		const url = fs.readFileSync(path.join(process.cwd(), ".git", "config"), "utf8").match(/url\s*=\s*(.+)/)?.[1] || "";
+		const m = url.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?\s*$/);
+		if (m) return m[1];
+	} catch {}
 	return "unknown/unknown";
 }
 
-async function uploadToPaste(source) {
-	const headers = {
-		"Content-Type": "text/plain; charset=utf-8"
-	};
-
-	if (CONFIG.pasteKey) {
-		headers.Authorization = `Bearer ${CONFIG.pasteKey}`;
-	}
-
-	const response = await request(
-		{
-			method: "POST",
-			url: `${CONFIG.pasteApi}?duration=${CONFIG.pasteTtlDays}d&ttl=${CONFIG.pasteTtlDays * 86400}`,
-			headers
-		},
-		source
-	);
-
-	if (response.status < 200 || response.status >= 300) {
-		const body = parseBody(response);
-
-		throw new Error(
-			body?.error?.message || `paste host responded ${response.status}`
-		);
-	}
-
-	const body = parseBody(response);
-
+function parseMeta(src) {
+	const str = (k) => src.match(new RegExp(`${k}\\s*:\\s*["'\`]([^"'\`]+)["'\`]`))?.[1];
+	const aliasBlock = src.match(/aliases\s*:\s*\[([^\]]*)\]/)?.[1] || "";
 	return {
-		id: body.id,
-		rawUrl: body.rawUrl || body.shortRawUrl || body.url
+		name: str("name"),
+		author: str("author") || "unknown",
+		version: str("version") || "1.0.0",
+		category: str("category") || "uncategorized",
+		aliases: [...aliasBlock.matchAll(/["'`]([^"'`]+)["'`]/g)].map((m) => m[1])
 	};
 }
 
-async function submitToStore(payload) {
-	const headers = {
-		"Content-Type": "application/json"
-	};
-
-	if (CONFIG.storeKey) {
-		headers.Authorization = `Bearer ${CONFIG.storeKey}`;
-	}
-
-	const response = await request(
-		{
-			method: "POST",
-			url: `${CONFIG.storeApi}/api/commands/bulk`,
-			headers
-		},
-		JSON.stringify(payload)
-	);
-
-	const body = parseBody(response);
-
-	if (response.status < 200 || response.status >= 300) {
-		throw new Error(
-			body?.error?.message || `store responded ${response.status}`
-		);
-	}
-
-	return body;
-}
-
-async function storeGet(endpoint, query) {
-	const url = new URL(`${CONFIG.storeApi}${endpoint}`);
-
-	for (const [key, value] of Object.entries(query || {})) {
-		if (value === undefined || value === null || value === "") continue;
-
-		url.searchParams.set(key, String(value));
-	}
-
-	const headers = {
-		Accept: "application/json"
-	};
-
-	if (CONFIG.storeKey) {
-		headers.Authorization = `Bearer ${CONFIG.storeKey}`;
-	}
-
-	const response = await request({
-		method: "GET",
-		url: url.toString(),
-		headers
-	});
-
-	const body = parseBody(response);
-
-	if (response.status < 200 || response.status >= 300) {
-		const error = new Error(
-			body?.error?.message || `store responded ${response.status}`
-		);
-
-		error.status = response.status;
-
-		throw error;
-	}
-
-	return body;
-}
-
-function listCommandFiles(filter) {
-	const dir = __dirname;
-
-	const files = fs
-		.readdirSync(dir)
+function listFiles(filter) {
+	const want = filter?.toLowerCase().replace(/\.js$/, "");
+	return fs.readdirSync(__dirname)
 		.filter((f) => f.endsWith(".js"))
-		.filter((f) => !CONFIG.selfNames.includes(f.replace(/\.js$/, "").toLowerCase()));
-
-	if (!filter) return files;
-
-	const wanted = filter.toLowerCase().replace(/\.js$/, "");
-
-	return files.filter(
-		(f) => f.replace(/\.js$/, "").toLowerCase() === wanted
-	);
+		.filter((f) => {
+			const n = f.slice(0, -3).toLowerCase();
+			return !CONFIG.selfNames.includes(n) && (!want || n === want);
+		});
 }
 
-function log(message) {
-	try {
-		console.log(`[commandstore] ${message}`);
-	} catch {
-	}
+async function uploadPaste(source) {
+	const ttl = CONFIG.pasteTtlDays;
+	const res = await http(`${CONFIG.pasteApi}?duration=${ttl}d&ttl=${ttl * 86400}`, {
+		method: "POST",
+		headers: { "Content-Type": "text/plain; charset=utf-8", ...auth(CONFIG.pasteKey) },
+		body: source
+	});
+	if (!res.ok) throw new Error(res.data?.error?.message || `paste host ${res.status}`);
+	return res.data.rawUrl || res.data.shortRawUrl || res.data.url;
 }
 
 async function publish(files) {
@@ -432,717 +118,221 @@ async function publish(files) {
 	const commands = [];
 	const skipped = [];
 
-	for (const filename of files) {
-		let source;
+	for (const file of files) {
+		const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+		const meta = parseMeta(source);
 
-		try {
-			source = fs.readFileSync(path.join(__dirname, filename), "utf8");
-		} catch (err) {
-			skipped.push(`${filename}: ${err.message}`);
-			continue;
-		}
-
-		if (!source.includes("module.exports")) {
-			skipped.push(`${filename}: not a GoatBot command`);
-			continue;
-		}
-
-		const parsed = parseConfig(source);
-
-		if (!parsed.name) {
-			skipped.push(`${filename}: no command name`);
+		if (!source.includes("module.exports") || !meta.name) {
+			skipped.push(`${file}: not a GoatBot command`);
 			continue;
 		}
 
 		try {
-			const paste = await uploadToPaste(source);
-
+			const rawUrl = await uploadPaste(source);
 			commands.push({
-				filename,
-				path: `scripts/cmds/${filename}`,
+				filename: file,
+				path: `scripts/cmds/${file}`,
 				source,
-				rawUrl: paste.rawUrl,
-				name: parsed.name,
-				author: parsed.author,
-				version: parsed.version,
-				category: parsed.category
+				rawUrl,
+				name: meta.name,
+				author: meta.author,
+				version: meta.version,
+				category: meta.category
 			});
-		} catch (err) {
-			skipped.push(`${filename}: paste failed (${err.message})`);
+		} catch (e) {
+			skipped.push(`${file}: paste failed (${e.message})`);
 		}
-
 		await sleep(CONFIG.uploadDelayMs);
 	}
 
-	if (commands.length === 0) {
-		log(`nothing to publish (${skipped.length} skipped)`);
+	if (!commands.length) return { status: "empty", skipped };
 
-		return {
-			status: "empty",
-			repo,
-			submitted: 0,
-			skipped
-		};
-	}
+	const res = await http(`${CONFIG.storeApi}/api/commands/bulk`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", ...auth(CONFIG.storeKey) },
+		body: JSON.stringify({ repo, commands, client: "goatbot-commandstore" })
+	});
 
-	let result;
+	if (!res.ok) return { status: "error", error: res.data?.error?.message || `store ${res.status}`, skipped };
 
-	try {
-		result = await submitToStore({
-			repo,
-			commands,
-			client: "goatbot-commandstore"
-		});
-	} catch (err) {
-		log(`store upload failed: ${err.message}`);
-
-		return {
-			status: "error",
-			repo,
-			error: err.message,
-			skipped
-		};
-	}
-
-	const summary = result?.data?.summary || {};
-
-	log(
-		`published ${summary.total ?? commands.length} from ${repo} ` +
-		`(created=${summary.created ?? 0} updated=${summary.updated ?? 0} ` +
-		`duplicate=${summary.duplicate ?? 0} outdated=${summary.outdated ?? 0} ` +
-		`rejected=${summary.error ?? 0} skipped=${skipped.length})`
-	);
-
-	return {
-		status: "ok",
-		repo,
-		summary,
-		skipped
-	};
+	const summary = res.data?.data?.summary || {};
+	log(`published ${summary.total ?? commands.length} from ${repo}, skipped ${skipped.length}`);
+	return { status: "ok", repo, summary, skipped };
 }
 
-function commandsDir() {
-	const dir = path.join(process.cwd(), "scripts", "cmds");
-
-	if (fs.existsSync(dir)) return dir;
-
-	return __dirname;
-}
-
-function existingFileFor(name, aliases) {
-	const dir = commandsDir();
-	const candidates = new Set([`${name}.js`]);
-
-	for (const alias of aliases || []) {
-		candidates.add(`${alias}.js`);
-	}
-
-	for (const candidate of candidates) {
-		if (fs.existsSync(path.join(dir, candidate))) {
-			return candidate;
-		}
-	}
-
-	return null;
-}
-
-const LANGS = {
-	en: {
-		title: "ＣＯＭＭＡＮＤ 𝗦𝗧𝗢𝗥𝗘",
-
-		usageFind: "{pn} <name> [page] - Search commands",
-		usageAuthor: "{pn} -a <author> [page] - Commands by author",
-		usageId: "{pn} id <id> - View command details",
-		usageRandom: "{pn} random - Discover a random command",
-		usageStats: "{pn} stats - Store statistics",
-		usagePublish: "{pn} publish [file] - Publish project commands",
-
-		hintReply: "Reply NEXT / PREV to navigate · ID to view · INSTALL ID to install",
-
-		searching: "Searching the command store...",
-		searchingAuthor: "Searching commands by %1...",
-
-		listTitle: "COMMAND DISCOVERY",
-		listTitleAuthor: "COMMANDS BY %1",
-		listEmpty: "No commands matched your search.",
-		listFooter: "PAGE %1 / %2",
-		listHint: "Reply NEXT / PREV · ID · INSTALL ID",
-
-		detailTitle: "COMMAND DETAILS",
-		labelId: "ID",
-		labelName: "Name",
-		labelAuthor: "Author",
-		labelVersion: "Version",
-		labelCategory: "Category",
-		labelSource: "Source",
-		labelPath: "Path",
-		labelAliases: "Aliases",
-		labelRaw: "Raw URL",
-		detailHint: "Reply INSTALL %1 to install this command.",
-
-		statsTitle: "STORE STATISTICS",
-		statCommands: "Commands",
-		statVersions: "Versions",
-		statAuthors: "Authors",
-		statCategories: "Categories",
-		statRepositories: "Repositories",
-		statCrawled: "Crawled",
-		statRetention: "Retention",
-		statSchedule: "Schedule",
-		statLastRun: "Last run",
-		statUpdated: "Updated",
-
-		overwriteTitle: "OVERWRITE CONFIRMATION",
-		overwriteBody: "%1 already exists on your bot.",
-		overwriteHint: "React to this message to confirm overwriting the existing file.",
-
-		installedTitle: "INSTALLATION COMPLETE",
-		installedName: "Name",
-		installedVersion: "Version",
-		installedAuthor: "Author",
-		installedFile: "File",
-		installedTrigger: "Triggers",
-
-		publishedTitle: "PUBLISHING COMPLETE",
-		publishedRepo: "Repository",
-		publishedTotal: "Total",
-		publishedCreated: "Created",
-		publishedUpdated: "Updated",
-		publishedDuplicate: "Duplicate",
-		publishedSkipped: "Skipped",
-
-		infoNoFile: "No matching command file was found to publish.",
-
-		errUsageId: "Usage: id <id>",
-		errUsageAuthor: "Usage: -a <author> [page]",
-		errUsageInstall: "Usage: INSTALL <id>",
-		errNoPage: "There is no active search page to navigate.",
-		errMorePages: "There are no more pages in this direction.",
-		errStore: "Could not connect to the command store: %1",
-		errSearch: "Search failed: %1",
-		errLoad: "Could not load command #%1: %2",
-		errRandom: "Could not load a random command: %1",
-		errSource: "Could not fetch the command source: %1",
-		errLoader: "GoatBot loadScripts is unavailable on this host.",
-		errInstall: "Installation failed: %1",
-		errPublish: "Publishing failed: %1",
-		errPublishEmpty: "No valid commands were found to publish.",
-		errReply: "Reply with an ID, INSTALL <id>, NEXT or PREV."
-	}
-};
-
-function langOf(getLang) {
-	if (typeof getLang === "function") return getLang;
-
-	return (key, ...args) => {
-		let text = LANGS.en[key] || "";
-
-		text = text.replace(/\{pn\}/g, "commandstore");
-
-		for (let i = args.length - 1; i >= 0; i--) {
-			text = text.replace(
-				new RegExp(`%${i + 1}`, "g"),
-				String(args[i])
-			);
-		}
-
-		return text;
-	};
-}
-
-async function sendStyled({ message }, text) {
+async function reply({ message }, text) {
 	try {
 		return await message.reply(text);
-	} catch (err) {
-		log(`reply failed: ${err.message}`);
+	} catch (e) {
+		log(`reply failed: ${e.message}`);
 		return null;
 	}
 }
 
-async function editStyled({ api, message }, messageID, text) {
-	if (messageID && typeof api?.editMessage === "function") {
+const msgId = (info) => (typeof info === "string" ? info : info?.messageID || null);
+
+async function edit(ctx, mid, text) {
+	if (mid && typeof ctx.api?.editMessage === "function") {
 		try {
-			await api.editMessage(text, messageID);
-
-			return { messageID };
-		} catch (err) {
-			log(`edit failed: ${err.message}`);
-		}
+			await ctx.api.editMessage(text, mid);
+			return { messageID: mid };
+		} catch {}
 	}
-
-	return sendStyled({ api, message }, text);
+	return reply(ctx, text);
 }
 
-function shortUsage(getLang) {
-	const L = langOf(getLang);
-
-	return card(
-		L("title"),
-		[
-			formatHeading("AVAILABLE COMMANDS"),
-			"",
-			`01. ${L("usageFind")}`,
-			`02. ${L("usageAuthor")}`,
-			`03. ${L("usageId")}`,
-			`04. ${L("usageRandom")}`,
-			`05. ${L("usageStats")}`,
-			`06. ${L("usagePublish")}`
-		],
-		L("hintReply")
-	);
+function remember(info, event, data) {
+	const mid = msgId(info);
+	if (!mid) return;
+	global.GoatBot?.onReply?.set(mid, { commandName: "commandstore", messageID: mid, author: event.senderID, data });
 }
 
-function listPageText(title, data, getLang) {
-	const L = langOf(getLang);
-	const pagination = data.pagination || {};
-	const items = Array.isArray(data.items) ? data.items : [];
+function listText(title, items, p) {
+	const lines = [`┌─ [ ${bold(title)} ]`, `│ ${p.total ?? items.length} results found`, "│"];
 
-	const page = pagination.page || 1;
-	const pages = pagination.pages || 1;
-	const total = pagination.total ?? items.length;
+	if (!items.length) lines.push("│ No commands matched your search.");
 
-	const lines = [
-		`┌─ ${formatHeading(title)}`,
-		`│ ${total} results found`,
-		"│"
-	];
+	items.forEach((it, i) => {
+		lines.push(`│ ${pad(i + 1)} · ${trunc(it.name, 30)}`);
+		const rows = kv([
+			["ID", `#${it.id}`],
+			["Author", trunc(it.author || "Unknown", 24)],
+			["Version", `v${it.latestVersion || "Unknown"}`],
+			["Category", trunc(it.category || "Uncategorized", 20)]
+		]);
+		lines.push(...rows.map((r) => `│   ${r}`));
+		if (i < items.length - 1) lines.push("│");
+	});
 
-	if (!items.length) {
-		lines.push(`│ ${L("listEmpty")}`);
-	} else {
-		items.forEach((item, index) => {
-			const rendered = commandCard(item, index).split("\n");
-
-			lines.push(...rendered);
-
-			if (index !== items.length - 1) {
-				lines.push("│");
-			}
-		});
-	}
-
-	lines.push("│", `│ ${L("listFooter", page, pages)}`);
-	lines.push(`└─⭔ ${L("listHint")}`);
-
+	lines.push("│", `│ PAGE ${p.page || 1} / ${p.pages || 1}`, "└─⭔ Reply NEXT / PREV · ID · INSTALL ID");
 	return lines.join("\n");
 }
 
-function rawUrlFor(command) {
-	return (
-		command.rawUrl ||
-		command.raw?.shortUrl ||
-		command.raw?.url ||
-		`${CONFIG.storeApi}/api/commands/id/${command.id}/rawurl`
-	);
-}
-
-async function resolveRawUrl(command) {
-	const stored = command.raw?.shortUrl || command.raw?.url;
-
-	if (stored) return stored;
-
-	try {
-		const body = await storeGet(
-			`/api/commands/id/${command.id}/rawurl`
-		);
-
-		return body.data?.rawUrl || null;
-	} catch {
-		return null;
-	}
-}
-
-function detailText(command, getLang) {
-	const L = langOf(getLang);
-
+function detail(c) {
 	const rows = [
-		`${L("labelId")}\t#${command.id}`,
-		`${L("labelName")}\t${command.name}`,
-		`${L("labelAuthor")}\t${command.author || "Unknown"}`,
-		`${L("labelVersion")}\tv${command.latestVersion || "Unknown"}`,
-		`${L("labelCategory")}\t${command.category || "Uncategorized"}`,
-		`${L("labelSource")}\t${command.sourceRepo || "Unknown"}`
+		["ID", `#${c.id}`],
+		["Name", c.name],
+		["Author", c.author || "Unknown"],
+		["Version", `v${c.latestVersion || "Unknown"}`],
+		["Category", c.category || "Uncategorized"],
+		["Source", c.sourceRepo || "Unknown"]
 	];
-
-	if (command.sourcePath) {
-		rows.push(`${L("labelPath")}\t${command.sourcePath}`);
-	}
-
-	if (command.aliases?.length) {
-		rows.push(
-			`${L("labelAliases")}\t${command.aliases.join(", ")}`
-		);
-	}
-
-	rows.push(`${L("labelRaw")}\t${rawUrlFor(command)}`);
-
-	return card(
-		L("detailTitle"),
-		alignColumns(rows),
-		L("detailHint", command.id)
-	);
+	if (c.sourcePath) rows.push(["Path", c.sourcePath]);
+	if (c.aliases?.length) rows.push(["Aliases", c.aliases.join(", ")]);
+	rows.push(["Raw URL", c.rawUrl || "Unknown"]);
+	return card("COMMAND DETAILS", kv(rows), `Reply INSTALL ${c.id} to install this command.`);
 }
 
-function statsText(stats, getLang) {
-	const L = langOf(getLang);
-	const lastRun = stats.lastRun || {};
-
-	const rows = [
-		`${L("statCommands")}\t${stats.commands ?? 0}`,
-		`${L("statVersions")}\t${stats.versions ?? 0}`,
-		`${L("statAuthors")}\t${stats.authors ?? 0}`,
-		`${L("statCategories")}\t${stats.categories ?? 0}`,
-		`${L("statRepositories")}\t${stats.repositories ?? 0}`,
-		`${L("statCrawled")}\t${stats.repositoriesCrawled ?? 0}`,
-		`${L("statRetention")}\t${stats.retentionDays ?? CONFIG.pasteTtlDays} days`,
-		`${L("statSchedule")}\t${stats.schedule?.cron || "0 0 * * *"} (${stats.schedule?.timezone || "UTC"})`
-	];
-
-	if (lastRun.finishedAt || lastRun.status) {
-		const stamp = formatStamp(lastRun.finishedAt);
-
-		rows.push(
-			`${L("statLastRun")}\t${[
-				lastRun.status || "Unknown",
-				stamp
-			].filter(Boolean).join(" · ")}`
-		);
-	}
-
-	if (stats.lastUpdatedAt) {
-		rows.push(
-			`${L("statUpdated")}\t${formatStamp(stats.lastUpdatedAt)}`
-		);
-	}
-
-	return card(
-		L("statsTitle"),
-		alignColumns(rows)
-	);
-}
-
-function numberOrNull(value) {
-	const n = Number.parseInt(value, 10);
-
-	return Number.isFinite(n) ? n : null;
-}
-
-function messageIdOf(info) {
-	if (!info) return null;
-
-	if (typeof info === "string") return info;
-
-	return info.messageID || null;
-}
-
-function registerReply(info, event, data) {
-	const messageID = messageIdOf(info);
-
-	if (!messageID || !global?.GoatBot?.onReply) return;
-
-	global.GoatBot.onReply.set(messageID, {
-		commandName: "commandstore",
-		messageID,
-		author: event.senderID,
-		data
-	});
-}
-
-async function showUsage(ctx) {
-	await sendStyled(ctx, shortUsage(ctx.getLang));
-}
-
-async function showStats(ctx) {
-	const L = langOf(ctx.getLang);
+async function search(ctx, { term, author, page = 1 }) {
+	const pending = await reply(ctx, card("COMMAND DISCOVERY", [author ? `Searching commands by ${author}...` : "Searching the command store..."]));
+	const mid = msgId(pending);
 
 	try {
-		const body = await storeGet("/api/stats");
-
-		await sendStyled(
-			ctx,
-			statsText(body.data || body, ctx.getLang)
-		);
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice("STORE ERROR", L("errStore", err.message))
-		);
-	}
-}
-
-async function search(ctx, options) {
-	const { event, args } = ctx;
-	const L = langOf(ctx.getLang);
-	const opts = options || {};
-
-	const term =
-		opts.term !== undefined
-			? opts.term
-			: args[0];
-
-	const author = opts.author;
-
-	const page = Math.max(
-		1,
-		numberOrNull(
-			opts.page !== undefined
-				? opts.page
-				: args[1]
-		) || 1
-	);
-
-	const offset = (page - 1) * CONFIG.pageSize;
-
-	const searching = author
-		? L("searchingAuthor", author)
-		: L("searching");
-
-	const pending = await sendStyled(
-		ctx,
-		card("COMMAND DISCOVERY", [searching])
-	);
-
-	const pendingID = messageIdOf(pending);
-
-	try {
-		const query = {
+		const body = await storeGet("/api/commands", {
+			...(author ? { author } : { name: term }),
 			limit: CONFIG.pageSize,
-			offset
-		};
+			offset: (page - 1) * CONFIG.pageSize
+		});
+		const items = body.data || [];
+		const p = body.pagination || {};
+		const title = author ? `COMMANDS BY ${author}` : "COMMAND DISCOVERY";
 
-		if (author) {
-			query.author = author;
-		} else {
-			query.name = term;
-		}
-
-		const body = await storeGet("/api/commands", query);
-		const data = Array.isArray(body.data) ? body.data : [];
-		const pagination = body.pagination || {};
-
-		const title = author
-			? L("listTitleAuthor", author)
-			: L("listTitle");
-
-		const text = listPageText(
-			title,
-			{ items: data, pagination },
-			ctx.getLang
-		);
-
-		const info = await editStyled(
-			ctx,
-			pendingID,
-			text
-		);
-
-		registerReply(info, event, {
+		const info = await edit(ctx, mid, listText(title, items, p));
+		remember(info, ctx.event, {
 			kind: author ? "author" : "search",
-			term: author || term,
+			term,
 			author: author || null,
-			page: pagination.page || page,
-			pages: pagination.pages || 1
+			page: p.page || page,
+			pages: p.pages || 1
 		});
-
-		return messageIdOf(info);
-	} catch (err) {
-		await editStyled(
-			ctx,
-			pendingID,
-			notice("SEARCH ERROR", L("errSearch", err.message))
-		);
-
-		return null;
+	} catch (e) {
+		await edit(ctx, mid, notice("SEARCH ERROR", `Search failed: ${e.message}`));
 	}
 }
 
-async function showById(ctx, id) {
-	const { event } = ctx;
-	const L = langOf(ctx.getLang);
-
+async function showCommand(ctx, endpoint, id) {
 	try {
-		const body = await storeGet(`/api/commands/id/${id}`);
-		const command = body.data;
-
-		command.rawUrl = await resolveRawUrl(command);
-
-		const info = await sendStyled(
-			ctx,
-			detailText(command, ctx.getLang)
-		);
-
-		registerReply(info, event, {
-			kind: "detail",
-			commandId: command.id
-		});
-
-		return messageIdOf(info);
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice(
-				"COMMAND ERROR",
-				L("errLoad", id, err.message)
-			)
-		);
-
-		return null;
+		const c = (await storeGet(endpoint)).data;
+		c.rawUrl = c.raw?.shortUrl || c.raw?.url || (await storeGet(`/api/commands/id/${c.id}/rawurl`).then((b) => b.data?.rawUrl).catch(() => null));
+		const info = await reply(ctx, detail(c));
+		remember(info, ctx.event, { kind: "detail", commandId: c.id });
+	} catch (e) {
+		await reply(ctx, notice("COMMAND ERROR", `Could not load command${id ? ` #${id}` : ""}: ${e.message}`));
 	}
 }
 
-async function showRandom(ctx) {
-	const { event } = ctx;
-	const L = langOf(ctx.getLang);
+const showById = (ctx, id) => showCommand(ctx, `/api/commands/id/${id}`, id);
 
+async function stats(ctx) {
 	try {
-		const body = await storeGet("/api/commands/random");
-		const command = body.data;
-
-		command.rawUrl = await resolveRawUrl(command);
-
-		const info = await sendStyled(
-			ctx,
-			detailText(command, ctx.getLang)
-		);
-
-		registerReply(info, event, {
-			kind: "detail",
-			commandId: command.id
-		});
-
-		return messageIdOf(info);
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice(
-				"DISCOVERY ERROR",
-				L("errRandom", err.message)
-			)
-		);
-
-		return null;
+		const s = (await storeGet("/api/stats")).data || {};
+		const r = s.lastRun || {};
+		const rows = [
+			["Commands", s.commands ?? 0],
+			["Versions", s.versions ?? 0],
+			["Authors", s.authors ?? 0],
+			["Categories", s.categories ?? 0],
+			["Repositories", s.repositories ?? 0],
+			["Crawled", s.repositoriesCrawled ?? 0],
+			["Retention", `${s.retentionDays ?? CONFIG.pasteTtlDays} days`],
+			["Schedule", `${s.schedule?.cron || "0 0 * * *"} (${s.schedule?.timezone || "UTC"})`]
+		];
+		if (r.status || r.finishedAt) rows.push(["Last run", [r.status || "Unknown", stamp(r.finishedAt)].filter(Boolean).join(" · ")]);
+		if (s.lastUpdatedAt) rows.push(["Updated", stamp(s.lastUpdatedAt)]);
+		await reply(ctx, card("STORE STATISTICS", kv(rows)));
+	} catch (e) {
+		await reply(ctx, notice("STORE ERROR", `Could not connect to the command store: ${e.message}`));
 	}
 }
 
-async function fetchCommandSource(id) {
-	const url = `${CONFIG.storeApi}/api/commands/id/${id}/raw?redirect=0`;
-
-	const response = await request({
-		method: "GET",
-		url,
-		headers: {
-			Accept: "text/plain"
-		}
-	});
-
-	if (response.status < 200 || response.status >= 300) {
-		throw new Error(`store responded ${response.status}`);
-	}
-
-	return typeof response.data === "string"
-		? response.data
-		: String(response.data);
-}
-
-function loadScripts() {
-	return global?.utils?.loadScripts || null;
-}
-
-async function installCommand(ctx, id, override) {
+async function install(ctx, id, override = false) {
 	const { api, event } = ctx;
-	const L = langOf(ctx.getLang);
-
-	let command;
 
 	try {
-		const body = await storeGet(`/api/commands/id/${id}`);
+		const cmd = (await storeGet(`/api/commands/id/${id}`)).data;
+		const loader = global.utils?.loadScripts;
 
-		command = body.data;
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice(
-				"INSTALLATION ERROR",
-				L("errLoad", id, err.message)
-			)
-		);
-
-		return;
-	}
-
-	const loader = loadScripts();
-
-	if (!loader) {
-		await sendStyled(
-			ctx,
-			notice("INSTALLATION ERROR", L("errLoader"))
-		);
-
-		return;
-	}
-
-	const fileName = `${command.name}.js`;
-
-	const target = existingFileFor(
-		command.name,
-		command.aliases
-	);
-
-	if (target && !override) {
-		const info = await sendStyled(
-			ctx,
-			card(
-				L("overwriteTitle"),
-				[
-					L("overwriteBody", target),
-					"",
-					L("overwriteHint")
-				]
-			)
-		);
-
-		const messageID = messageIdOf(info);
-
-		if (messageID && global?.GoatBot?.onReaction) {
-			global.GoatBot.onReaction.set(messageID, {
-				commandName: "commandstore",
-				messageID,
-				author: event.senderID,
-				data: {
-					action: "install",
-					id,
-					override: true
-				}
-			});
+		if (!loader) {
+			return reply(ctx, notice("INSTALLATION ERROR", "GoatBot loadScripts is unavailable on this host."));
 		}
 
-		return;
-	}
+		const cmdsDir = fs.existsSync(path.join(process.cwd(), "scripts", "cmds"))
+			? path.join(process.cwd(), "scripts", "cmds")
+			: __dirname;
 
-	let source;
+		const names = [cmd.name, ...(cmd.aliases || [])];
+		const existing = names.map((n) => `${n}.js`).find((f) => fs.existsSync(path.join(cmdsDir, f)));
 
-	try {
-		source = await fetchCommandSource(id);
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice(
-				"SOURCE ERROR",
-				L("errSource", err.message)
-			)
-		);
+		if (existing && !override) {
+			const info = await reply(ctx, card("OVERWRITE CONFIRMATION", [
+				`${existing} already exists on your bot.`,
+				"",
+				"React to this message to confirm overwriting the existing file."
+			]));
+			const mid = msgId(info);
+			if (mid) {
+				global.GoatBot?.onReaction?.set(mid, {
+					commandName: "commandstore",
+					messageID: mid,
+					author: event.senderID,
+					data: { action: "install", id }
+				});
+			}
+			return;
+		}
 
-		return;
-	}
-
-	try {
-		const { configCommands } = global?.GoatBot || {};
+		const raw = await http(`${CONFIG.storeApi}/api/commands/id/${id}/raw?redirect=0`, {
+			headers: { Accept: "text/plain" }
+		});
+		if (!raw.ok) {
+			return reply(ctx, notice("SOURCE ERROR", `Could not fetch the command source: store responded ${raw.status}`));
+		}
 
 		const info = loader(
 			"cmds",
-			fileName,
-			global?.utils?.log,
-			configCommands,
+			`${cmd.name}.js`,
+			global.utils?.log,
+			global.GoatBot?.configCommands,
 			api,
 			event.threadModel,
 			event.userModel,
@@ -1153,269 +343,66 @@ async function installCommand(ctx, id, override) {
 			event.dashBoardData,
 			event.globalData,
 			event.getLang,
-			source
+			raw.text
 		);
 
-		if (info && info.status === "success") {
-			const names = [
-				command.name,
-				...(command.aliases || [])
-			].join(", ");
-
-			await sendStyled(
-				ctx,
-				card(
-					L("installedTitle"),
-					alignColumns([
-						`${L("installedName")}\t${command.name}`,
-						`${L("installedVersion")}\tv${command.latestVersion}`,
-						`${L("installedAuthor")}\t${command.author}`,
-						`${L("installedFile")}\tscripts/cmds/${fileName}`,
-						`${L("installedTrigger")}\t${names}`
-					]),
-					"Command is ready to use."
-				)
-			);
-
-			log(
-				`installed ${command.name} v${command.latestVersion}`
-			);
-		} else {
-			const error = info?.error;
-
-			await sendStyled(
-				ctx,
-				notice(
-					"INSTALLATION ERROR",
-					L(
-						"errInstall",
-						error
-							? `${error.name}: ${error.message}`
-							: "unknown error"
-					)
-				)
-			);
+		if (info?.status === "success") {
+			return reply(ctx, card("INSTALLATION COMPLETE", kv([
+				["Name", cmd.name],
+				["Version", `v${cmd.latestVersion}`],
+				["Author", cmd.author],
+				["File", `scripts/cmds/${cmd.name}.js`],
+				["Triggers", names.join(", ")]
+			]), "Command is ready to use."));
 		}
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice(
-				"INSTALLATION ERROR",
-				L("errInstall", err.message)
-			)
-		);
+
+		const err = info?.error;
+		return reply(ctx, notice("INSTALLATION ERROR", `Installation failed: ${err ? `${err.name}: ${err.message}` : "unknown error"}`));
+	} catch (e) {
+		return reply(ctx, notice("INSTALLATION ERROR", `Installation failed: ${e.message}`));
 	}
 }
 
-async function handleReply(ctx) {
-	const { event, Reply } = ctx;
+async function publishCmd(ctx, filter) {
+	const files = listFiles(filter);
 
-	if (String(event.senderID || event.userID) !== String(Reply?.author)) {
-		return;
+	if (!files.length) {
+		return reply(ctx, notice("PUBLISHING", "No matching command file was found to publish."));
 	}
 
-	const { args } = ctx;
-	const L = langOf(ctx.getLang);
-	const data = Reply?.data || {};
+	const r = await publish(files);
 
-	const first = (args[0] || "").toLowerCase();
-
-	if (first === "install") {
-		const id = numberOrNull(args[1]);
-
-		if (id === null) {
-			await sendStyled(
-				ctx,
-				notice("COMMAND ERROR", L("errUsageInstall"))
-			);
-
-			return;
-		}
-
-		await installCommand(ctx, id, false);
-
-		return;
-	}
-
-	if (first === "next" || first === "prev") {
-		const session = data;
-
-		if (
-			!session ||
-			(session.kind !== "search" && session.kind !== "author")
-		) {
-			await sendStyled(
-				ctx,
-				notice("NAVIGATION ERROR", L("errNoPage"))
-			);
-
-			return;
-		}
-
-		const delta = first === "next" ? 1 : -1;
-		const target = session.page + delta;
-
-		if (target < 1 || target > session.pages) {
-			await sendStyled(
-				ctx,
-				notice("NAVIGATION ERROR", L("errMorePages"))
-			);
-
-			return;
-		}
-
-		await search(
-			ctx,
-			session.author
-				? {
-					author: session.author,
-					page: target
-				}
-				: {
-					term: session.term,
-					page: target
-				}
-		);
-
-		return;
-	}
-
-	const id = numberOrNull(first);
-
-	if (id !== null) {
-		await showById(ctx, id);
-		return;
-	}
-
-	await sendStyled(
-		ctx,
-		notice("REPLY HELP", L("errReply"))
-	);
-}
-
-async function handleReaction(ctx) {
-	const { event, Reaction } = ctx;
-	const data = Reaction?.data || {};
-
-	if (
-		String(event.userID || event.senderID) !==
-		String(Reaction?.author)
-	) {
-		return;
-	}
-
-	if (data.action !== "install") return;
-
-	await installCommand(ctx, data.id, true);
-}
-
-async function handlePublish(ctx) {
-	const L = langOf(ctx.getLang);
-	const filter = ctx.args[0] || null;
-
-	let files;
-
-	try {
-		files = listCommandFiles(filter);
-	} catch (err) {
-		await sendStyled(
-			ctx,
-			notice("PUBLISHING ERROR", L("errPublish", err.message))
-		);
-
-		return;
-	}
-
-	if (files.length === 0) {
-		await sendStyled(
-			ctx,
-			notice("PUBLISHING", L("infoNoFile"))
-		);
-
-		return;
-	}
-
-	const result = await publish(files);
-
-	if (result.status === "ok") {
-		const summary = result.summary || {};
-
-		const body = alignColumns([
-			`${L("publishedRepo")}\t${result.repo}`,
-			`${L("publishedTotal")}\t${summary.total ?? files.length}`,
-			`${L("publishedCreated")}\t${summary.created ?? 0}`,
-			`${L("publishedUpdated")}\t${summary.updated ?? 0}`,
-			`${L("publishedDuplicate")}\t${summary.duplicate ?? 0}`,
-			`${L("publishedSkipped")}\t${result.skipped.length}`
+	if (r.status === "ok") {
+		const s = r.summary;
+		const body = kv([
+			["Repository", r.repo],
+			["Total", s.total ?? files.length],
+			["Created", s.created ?? 0],
+			["Updated", s.updated ?? 0],
+			["Duplicate", s.duplicate ?? 0],
+			["Skipped", r.skipped.length]
 		]);
-
-		if (result.skipped.length) {
-			body.push(
-				"",
-				formatHeading("SKIPPED FILES"),
-				...result.skipped
-					.slice(0, 5)
-					.map((item) => `- ${truncate(item, 100)}`)
-			);
+		if (r.skipped.length) {
+			body.push("", `[ ${bold("SKIPPED FILES")} ]`, ...r.skipped.slice(0, 5).map((x) => `- ${trunc(x, 100)}`));
 		}
-
-		await sendStyled(
-			ctx,
-			card(L("publishedTitle"), body)
-		);
-
-		return;
+		return reply(ctx, card("PUBLISHING COMPLETE", body));
 	}
 
-	if (result.status === "empty") {
-		await sendStyled(
-			ctx,
-			card(
-				"PUBLISHING RESULTS",
-				[
-					L("errPublishEmpty"),
-					"",
-					`${result.skipped.length} files skipped.`
-				]
-			)
-		);
-
-		return;
+	if (r.status === "empty") {
+		return reply(ctx, card("PUBLISHING RESULTS", ["No valid commands were found to publish.", "", `${r.skipped.length} files skipped.`]));
 	}
 
-	await sendStyled(
-		ctx,
-		notice(
-			"PUBLISHING ERROR",
-			L("errPublish", result.error || result.status)
-		)
-	);
+	return reply(ctx, notice("PUBLISHING ERROR", r.error || "Unknown error"));
 }
 
 let autoPublished = false;
-
-async function autoPublish() {
-	if (autoPublished || CONFIG.autoPublish === false) return;
-
-	autoPublished = true;
-
-	try {
-		const files = listCommandFiles(null);
-
-		if (files.length) {
-			await publish(files);
-		}
-	} catch (err) {
-		log(`auto publish failed: ${err.message}`);
-	}
-}
 
 module.exports = {
 	config: {
 		name: "commandstore",
 		aliases: ["cmdstore", "goatstore", "cs", "gs"],
 		author: "Neoaz 🐊",
-		version: "2.6.0",
+		version: "2.7.0",
 		category: "owner",
 		role: 2,
 		countDown: 5,
@@ -1434,136 +421,100 @@ module.exports = {
 		}
 	},
 
-	langs: LANGS,
-
 	onLoad: async function () {
-		await autoPublish();
+		if (autoPublished || !CONFIG.autoPublish) return;
+		autoPublished = true;
+		try {
+			const files = listFiles();
+			if (files.length) await publish(files);
+		} catch (e) {
+			log(`auto publish failed: ${e.message}`);
+		}
 	},
 
-	onStart: async function ({
-		api,
-		event,
-		message,
-		args,
-		getLang
-	}) {
-		const ctx = {
-			api,
-			event,
-			message,
-			args,
-			getLang
-		};
-
+	onStart: async function (ctx) {
+		const { args } = ctx;
 		const first = (args[0] || "").toLowerCase();
 
 		if (!first) {
-			return showUsage(ctx);
+			return reply(ctx, card("COMMAND STORE", [
+				`01. commandstore <name> [page] - Search commands`,
+				`02. commandstore -a <author> [page] - Commands by author`,
+				`03. commandstore id <id> - View command details`,
+				`04. commandstore random - Discover a random command`,
+				`05. commandstore stats - Store statistics`,
+				`06. commandstore publish [file] - Publish project commands`
+			], "Reply NEXT / PREV to navigate · ID to view · INSTALL ID to install"));
 		}
 
-		if (first === "stats") {
-			return showStats(ctx);
-		}
-
-		if (first === "random") {
-			return showRandom(ctx);
-		}
+		if (first === "stats") return stats(ctx);
+		if (first === "random") return showCommand(ctx, "/api/commands/random");
 
 		if (first === "id") {
-			const id = numberOrNull(args[1]);
-
-			if (id === null) {
-				return sendStyled(
-					ctx,
-					notice(
-						"COMMAND ERROR",
-						langOf(getLang)("errUsageId")
-					)
-				);
-			}
-
-			return showById(ctx, id);
+			const id = Number.parseInt(args[1], 10);
+			return Number.isFinite(id)
+				? showById(ctx, id)
+				: reply(ctx, notice("COMMAND ERROR", "Usage: id <id>"));
 		}
 
-		if (
-			first === "publish" ||
-			first === "all" ||
-			first === "push"
-		) {
-			return handlePublish({
-				...ctx,
-				args: args.slice(1)
-			});
+		if (["publish", "all", "push"].includes(first)) {
+			return publishCmd(ctx, args[1]);
 		}
 
-		if (
-			first === "-a" ||
-			first === "--author" ||
-			first === "author"
-		) {
-			const author = args
-				.slice(1)
-				.filter((a) => !/^\d+$/.test(a))
-				.join(" ")
-				.trim();
-
-			if (!author) {
-				return sendStyled(
-					ctx,
-					notice(
-						"COMMAND ERROR",
-						langOf(getLang)("errUsageAuthor")
-					)
-				);
-			}
-
-			const page = numberOrNull(args[args.length - 1]);
-
-			return search(ctx, {
-				author,
-				page: page !== null && args.length > 2 ? page : 1
-			});
+		if (["-a", "--author", "author"].includes(first)) {
+			const rest = args.slice(1);
+			let page = 1;
+			if (rest.length > 1 && /^\d+$/.test(rest[rest.length - 1])) page = Number(rest.pop());
+			const author = rest.join(" ").trim();
+			if (!author) return reply(ctx, notice("COMMAND ERROR", "Usage: -a <author> [page]"));
+			return search(ctx, { author, page });
 		}
-
-		const page = numberOrNull(args[1]);
 
 		return search(ctx, {
 			term: args[0],
-			page: page !== null ? page : 1
+			page: Number.parseInt(args[1], 10) || 1
 		});
 	},
 
-	onReply: async function ({
-		api,
-		event,
-		message,
-		args,
-		Reply,
-		getLang
-	}) {
-		await handleReply({
-			api,
-			event,
-			message,
-			args,
-			Reply,
-			getLang
-		});
+	onReply: async function (ctx) {
+		const { event, args, Reply } = ctx;
+
+		// Shudhu jini command chalieche, tar reply-i process hobe
+		if (String(event.senderID) !== String(Reply?.author)) return;
+
+		const cmd = (args[0] || "").toLowerCase();
+		const s = Reply?.data || {};
+
+		if (cmd === "install") {
+			const id = Number.parseInt(args[1], 10);
+			return Number.isFinite(id)
+				? install(ctx, id)
+				: reply(ctx, notice("COMMAND ERROR", "Usage: INSTALL <id>"));
+		}
+
+		if (cmd === "next" || cmd === "prev") {
+			if (s.kind !== "search" && s.kind !== "author") {
+				return reply(ctx, notice("NAVIGATION ERROR", "There is no active search page to navigate."));
+			}
+			const target = s.page + (cmd === "next" ? 1 : -1);
+			if (target < 1 || target > s.pages) {
+				return reply(ctx, notice("NAVIGATION ERROR", "There are no more pages in this direction."));
+			}
+			return search(ctx, { term: s.term, author: s.author, page: target });
+		}
+
+		const id = Number.parseInt(cmd, 10);
+		if (Number.isFinite(id)) return showById(ctx, id);
+
+		return reply(ctx, notice("REPLY HELP", "Reply with an ID, INSTALL <id>, NEXT or PREV."));
 	},
 
-	onReaction: async function ({
-		api,
-		event,
-		message,
-		Reaction,
-		getLang
-	}) {
-		await handleReaction({
-			api,
-			event,
-			message,
-			Reaction,
-			getLang
-		});
+	onReaction: async function (ctx) {
+		const { event, Reaction } = ctx;
+
+		if (String(event.userID || event.senderID) !== String(Reaction?.author)) return;
+		if (Reaction?.data?.action === "install") {
+			return install(ctx, Reaction.data.id, true);
+		}
 	}
 };
