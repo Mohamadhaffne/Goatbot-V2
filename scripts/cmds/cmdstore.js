@@ -41,8 +41,7 @@ function card(title, body = [], footer) {
 const notice = (title, msg) => card(title, [msg]);
 
 function kv(rows) {
-	const w = Math.max(...rows.map(([k]) => k.length));
-	return rows.map(([k, v]) => `${k.padEnd(w)} : ${v}`);
+	return rows.map(([k, v]) => `${k.padEnd(10)} : ${v}`);
 }
 
 function stamp(v) {
@@ -193,14 +192,13 @@ function listText(title, items, p) {
 	if (!items.length) lines.push("│ No commands matched your search.");
 
 	items.forEach((it, i) => {
-		lines.push(`│ ${pad(i + 1)} · ${trunc(it.name, 30)}`);
-		const rows = kv([
+		lines.push(`│ ${pad(i + 1)} [ ${bold(trunc(it.name, 30))} ]`);
+		lines.push(...kv([
 			["ID", `#${it.id}`],
 			["Author", trunc(it.author || "Unknown", 24)],
 			["Version", `v${it.latestVersion || "Unknown"}`],
 			["Category", trunc(it.category || "Uncategorized", 20)]
-		]);
-		lines.push(...rows.map((r) => `│   ${r}`));
+		]).map((r) => `│   ${r}`));
 		if (i < items.length - 1) lines.push("│");
 	});
 
@@ -479,7 +477,6 @@ module.exports = {
 	onReply: async function (ctx) {
 		const { event, args, Reply } = ctx;
 
-		// Shudhu jini command chalieche, tar reply-i process hobe
 		if (String(event.senderID) !== String(Reply?.author)) return;
 
 		const cmd = (args[0] || "").toLowerCase();
