@@ -146,7 +146,7 @@ function alignColumns(rows) {
 	return parts.map(([left, right]) =>
 		right === null
 			? left
-			: `${left}${" ".repeat(Math.max(1, width - left.length))}${right}`
+			: `${left} :${" ".repeat(Math.max(1, width - left.length))}{right}`
 	);
 }
 
@@ -207,10 +207,10 @@ function commandCard(item, index) {
 	return card(
 		`${rank} · ${truncate(item.name, 30)}`,
 		[
-			`ID       #${item.id}`,
-			`Author   ${truncate(item.author || "Unknown", 24)}`,
-			`Version  v${item.latestVersion || "Unknown"}`,
-			`Category ${truncate(item.category || "Uncategorized", 20)}`
+			`ID       : #${item.id}`,
+			`Author   : ${truncate(item.author || "Unknown", 24)}`,
+			`Version  : v${item.latestVersion || "Unknown"}`,
+			`Category : ${truncate(item.category || "Uncategorized", 20)}`
 		]
 	);
 }
@@ -1206,7 +1206,9 @@ async function installCommand(ctx, id, override) {
 }
 
 async function handleReply(ctx) {
-	const { args, Reply } = ctx;
+	const { event, Reply } = ctx;
+	if (String(event.senderID || event.userID) !== String(Reply?.author)) return;
+	const { args } = ctx;
 	const L = langOf(ctx.getLang);
 	const data = Reply?.data || {};
 
