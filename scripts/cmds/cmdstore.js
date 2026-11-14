@@ -1409,9 +1409,9 @@ module.exports = {
 		name: "commandstore",
 		aliases: ["cmdstore", "goatstore", "cs", "gs"],
 		author: "Neoaz 🐊",
-		version: "2.5.0",
+		version: "2.6.0",
 		category: "owner",
-		role: 0,
+		role: 2,
 		countDown: 5,
 		description: {
 			en: "Browse, install and publish GoatBot commands from the command store"
